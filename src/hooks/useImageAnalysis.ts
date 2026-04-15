@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { AnalysisStats } from "@/lib/imageProcessing"
 import type {
   AnalyzeRequest,
+  AnalyzeFromBitmapRequest,
   WorkerOutMessage,
 } from "@/workers/imageAnalysis.worker"
 import AnalysisWorker from "@/workers/imageAnalysis.worker?worker"
@@ -20,16 +21,24 @@ export interface AnalysisState {
   originalData: Uint8ClampedArray | null
   width: number
   height: number
+  /** Original image dimensions before any downscaling. */
+  originalWidth: number
+  originalHeight: number
+  wasDownscaled: boolean
   error: string | null
 }
 
-const DEBOUNCE_MS = 300
+/** If image exceeds this many pixels it will be downscaled before processing. */
+const MAX_PIXELS = 4_000_000 // 4 MP
+
+/** Debounce only applies when radius changes on an already-loaded image. */
+const RADIUS_DEBOUNCE_MS = 300
 
 const IDLE_STATE: AnalysisState = {
   status: "idle",
   step: null,
   stepDone: 0,
-  stepTotal: 4,
+  stepTotal: 5,
   luminance: null,
   contrast: null,
   edge: null,
@@ -37,6 +46,9 @@ const IDLE_STATE: AnalysisState = {
   originalData: null,
   width: 0,
   height: 0,
+  originalWidth: 0,
+  originalHeight: 0,
+  wasDownscaled: false,
   error: null,
 }
 
@@ -50,14 +62,26 @@ export function useImageAnalysis(
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const requestIdRef = useRef(0)
 
-  // Create worker once; set a single persistent onmessage handler.
+  // Tracks which image the layout effect last processed — prevents double-run
+  // in React StrictMode from clearing state that was just set.
+  const prevImageRef = useRef<HTMLImageElement | null>(null)
+
+  // Cached pixel data for radius-only reanalysis (avoids re-extracting from image).
+  const cachedPixelDataRef = useRef<Uint8ClampedArray | null>(null)
+  const cachedWidthRef = useRef(0)
+  const cachedHeightRef = useRef(0)
+
+  // Always up-to-date radius, read inside async closures.
+  const radiusRef = useRef(radius)
+  radiusRef.current = radius
+
+  // ── Worker lifecycle ──────────────────────────────────────────────────────
   useEffect(() => {
     const worker = new AnalysisWorker()
     workerRef.current = worker
 
     worker.onmessage = (e: MessageEvent<WorkerOutMessage>) => {
       const msg = e.data
-      // Discard results from stale (superseded) requests.
       if (msg.requestId !== requestIdRef.current) return
 
       switch (msg.type) {
@@ -70,20 +94,43 @@ export function useImageAnalysis(
           }))
           break
 
-        case "result":
-          setState((prev) => ({
-            ...prev,
-            status: "done",
-            step: null,
-            stepDone: prev.stepTotal,
-            luminance: new Float32Array(msg.luminanceBuffer),
-            contrast: new Float32Array(msg.contrastBuffer),
-            edge: new Float32Array(msg.edgeBuffer),
-            stats: msg.stats,
-            width: msg.width,
-            height: msg.height,
-          }))
+        case "result": {
+          if (msg.originalBuffer) {
+            const pd = new Uint8ClampedArray(msg.originalBuffer)
+            cachedPixelDataRef.current = pd
+            cachedWidthRef.current = msg.width
+            cachedHeightRef.current = msg.height
+
+            setState((prev) => ({
+              ...prev,
+              status: "done",
+              step: null,
+              stepDone: prev.stepTotal,
+              luminance: new Float32Array(msg.luminanceBuffer),
+              contrast: new Float32Array(msg.contrastBuffer),
+              edge: new Float32Array(msg.edgeBuffer),
+              stats: msg.stats,
+              originalData: pd,
+              width: msg.width,
+              height: msg.height,
+              originalWidth: msg.origWidth,
+              originalHeight: msg.origHeight,
+              wasDownscaled: msg.wasDownscaled,
+            }))
+          } else {
+            setState((prev) => ({
+              ...prev,
+              status: "done",
+              step: null,
+              stepDone: prev.stepTotal,
+              luminance: new Float32Array(msg.luminanceBuffer),
+              contrast: new Float32Array(msg.contrastBuffer),
+              edge: new Float32Array(msg.edgeBuffer),
+              stats: msg.stats,
+            }))
+          }
           break
+        }
 
         case "error":
           setState((prev) => ({
@@ -96,7 +143,6 @@ export function useImageAnalysis(
       }
     }
 
-    // Catches worker-level errors that escape onmessage (e.g. syntax errors)
     worker.onerror = (e: ErrorEvent) => {
       e.preventDefault()
       setState((prev) => ({
@@ -113,79 +159,153 @@ export function useImageAnalysis(
     }
   }, [])
 
-  useEffect(() => {
+  // ── Synchronous clear before paint (useLayoutEffect) ─────────────────────
+  // Runs before the browser paints whenever `image` changes.
+  // Immediately wipes all previous result data and shows the processing
+  // state so the user never sees stale output during a new image load.
+  useLayoutEffect(() => {
+    if (prevImageRef.current === image) return
+
+    // Cancel any queued radius-reanalysis debounce.
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+
+    cachedPixelDataRef.current = null
+    ++requestIdRef.current // make any in-flight worker response stale
+    prevImageRef.current = image
+
     if (!image) {
       setState(IDLE_STATE)
       return
     }
 
-    if (debounceRef.current) clearTimeout(debounceRef.current)
+    const origW = image.naturalWidth
+    const origH = image.naturalHeight
+    const pixels = origW * origH
+    let targetW = origW
+    let targetH = origH
+    if (pixels > MAX_PIXELS) {
+      const scale = Math.sqrt(MAX_PIXELS / pixels)
+      targetW = Math.max(1, Math.round(origW * scale))
+      targetH = Math.max(1, Math.round(origH * scale))
+    }
 
-    debounceRef.current = setTimeout(() => {
-      const worker = workerRef.current
-      if (!worker) return
+    // Full reset — clears originalData so CanvasViewer shows skeleton, not old image.
+    setState({
+      ...IDLE_STATE,
+      status: "processing",
+      step: "Preparing…",
+      stepDone: 0,
+      stepTotal: 5,
+      originalWidth: origW,
+      originalHeight: origH,
+      wasDownscaled: targetW !== origW || targetH !== origH,
+    })
+  }, [image])
 
-      // Increment request ID so any in-flight result from a prior run is ignored.
-      const requestId = ++requestIdRef.current
+  // ── Async work (useEffect) ────────────────────────────────────────────────
+  // Runs after paint. Two paths:
+  //   • cachedPixelDataRef is null  → new image, decode bitmap + dispatch to worker
+  //   • cachedPixelDataRef has data → radius changed, debounced re-dispatch
+  useEffect(() => {
+    if (!image) return
 
-      try {
-        const w = image.naturalWidth
-        const h = image.naturalHeight
+    if (!cachedPixelDataRef.current) {
+      // ── New image path ──────────────────────────────────────────────────
+      const origW = image.naturalWidth
+      const origH = image.naturalHeight
+      const pixels = origW * origH
+      let targetW = origW
+      let targetH = origH
+      if (pixels > MAX_PIXELS) {
+        const scale = Math.sqrt(MAX_PIXELS / pixels)
+        targetW = Math.max(1, Math.round(origW * scale))
+        targetH = Math.max(1, Math.round(origH * scale))
+      }
 
-        let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null
+      // Capture the requestId that the layout effect already incremented.
+      const requestId = requestIdRef.current
+      let cancelled = false
 
-        if (typeof OffscreenCanvas !== "undefined") {
-          const canvas = new OffscreenCanvas(w, h)
-          ctx = canvas.getContext("2d") as OffscreenCanvasRenderingContext2D | null
-        } else {
-          const canvas = document.createElement("canvas")
-          canvas.width = w
-          canvas.height = h
-          ctx = canvas.getContext("2d")
+      void (async () => {
+        try {
+          const bitmap = await createImageBitmap(image, {
+            resizeWidth: targetW,
+            resizeHeight: targetH,
+            resizeQuality: "medium",
+          })
+
+          if (cancelled || requestId !== requestIdRef.current) {
+            bitmap.close()
+            return
+          }
+
+          const worker = workerRef.current
+          if (!worker) {
+            bitmap.close()
+            return
+          }
+
+          const request: AnalyzeFromBitmapRequest = {
+            type: "analyzeFromBitmap",
+            requestId,
+            bitmap,
+            width: targetW,
+            height: targetH,
+            origWidth: origW,
+            origHeight: origH,
+            radius: radiusRef.current,
+          }
+          worker.postMessage(request, [bitmap as unknown as Transferable])
+        } catch (err) {
+          if (!cancelled && requestId === requestIdRef.current) {
+            setState((prev) => ({
+              ...prev,
+              status: "error",
+              step: null,
+              error: err instanceof Error ? err.message : String(err),
+            }))
+          }
         }
+      })()
 
-        if (!ctx) throw new Error("Could not acquire 2D canvas context")
+      return () => {
+        cancelled = true
+      }
+    } else {
+      // ── Radius change path ──────────────────────────────────────────────
+      setState((prev) => ({
+        ...prev,
+        status: "processing",
+        step: "Reanalysing…",
+        stepDone: 0,
+        stepTotal: 4,
+      }))
 
-        ctx.drawImage(image, 0, 0)
-        const imageData = ctx.getImageData(0, 0, w, h)
-        const originalData = imageData.data
+      const cachedData = cachedPixelDataRef.current
 
-        setState((prev) => ({
-          ...prev,
-          status: "processing",
-          step: "Extracting image data…",
-          stepDone: 0,
-          stepTotal: 4,
-          error: null,
-          originalData,
-          width: w,
-          height: h,
-        }))
-
-        // Transfer a copy of the buffer to the worker (transferred, not copied again)
-        const buffer = originalData.buffer.slice(0) as ArrayBuffer
+      debounceRef.current = setTimeout(() => {
+        const requestId = ++requestIdRef.current
+        const buffer = cachedData.buffer.slice(0) as ArrayBuffer
+        const worker = workerRef.current
+        if (!worker) return
 
         const request: AnalyzeRequest = {
           type: "analyze",
           requestId,
           buffer,
-          width: w,
-          height: h,
-          radius,
+          width: cachedWidthRef.current,
+          height: cachedHeightRef.current,
+          radius: radiusRef.current,
         }
         worker.postMessage(request, [buffer])
-      } catch (err) {
-        setState((prev) => ({
-          ...prev,
-          status: "error",
-          step: null,
-          error: err instanceof Error ? err.message : String(err),
-        }))
-      }
-    }, DEBOUNCE_MS)
+      }, RADIUS_DEBOUNCE_MS)
 
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current)
+      return () => {
+        if (debounceRef.current) clearTimeout(debounceRef.current)
+      }
     }
   }, [image, radius])
 

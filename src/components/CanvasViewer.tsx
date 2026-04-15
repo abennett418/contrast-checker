@@ -10,6 +10,8 @@ interface CanvasViewerProps {
   label: string
   onHover?: (point: HoverPoint | null) => void
   externalHover?: HoverPoint | null
+  /** Show a loading indicator. Keeps previous image visible while overlaying a spinner. */
+  loading?: boolean
 }
 
 export function CanvasViewer({
@@ -17,6 +19,7 @@ export function CanvasViewer({
   label,
   onHover,
   externalHover,
+  loading = false,
 }: CanvasViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // Separate canvas for the crosshair overlay so we don't redraw the image
@@ -118,7 +121,16 @@ export function CanvasViewer({
               className="pointer-events-none absolute inset-0 block w-full"
               style={{ imageRendering: "pixelated" }}
             />
+            {loading && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
+                <div className="border-primary size-9 animate-spin rounded-full border-2 border-t-transparent" />
+              </div>
+            )}
           </>
+        ) : loading ? (
+          <div className="bg-muted flex aspect-video animate-pulse items-center justify-center rounded-md">
+            <div className="border-primary size-9 animate-spin rounded-full border-2 border-t-transparent" />
+          </div>
         ) : (
           <div className="bg-muted flex aspect-video items-center justify-center rounded-md">
             <span className="text-muted-foreground text-sm">No image</span>

@@ -125,12 +125,24 @@ export function App() {
               )}
 
               {/* Side-by-side viewers */}
+              {analysis.wasDownscaled && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                  <span className="mt-px">⚠</span>
+                  <span>
+                    Image downscaled from{" "}
+                    <strong>{analysis.originalWidth}×{analysis.originalHeight}</strong> to{" "}
+                    <strong>{analysis.width}×{analysis.height}</strong>{" "}
+                    to stay within the 4 MP processing limit. Analysis reflects the scaled version.
+                  </span>
+                </div>
+              )}
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <CanvasViewer
                   imageData={originalImageData}
                   label="Original"
                   onHover={handleHover}
                   externalHover={hoverPoint}
+                  loading={analysis.status === "processing" && !analysis.originalData}
                 />
                 <CanvasViewer
                   imageData={vizImageData}
@@ -145,6 +157,7 @@ export function App() {
                   }
                   onHover={handleHover}
                   externalHover={hoverPoint}
+                  loading={analysis.status === "processing"}
                 />
               </div>
 
