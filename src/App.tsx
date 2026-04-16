@@ -68,9 +68,12 @@ export function App() {
       {/* Header */}
       <header className="border-b px-6 py-4">
         <div className="mx-auto max-w-7xl">
-          <h1 className="text-lg font-semibold tracking-tight">
-            Contrast Checker
-          </h1>
+          <div className="flex items-center gap-2">
+            <img src="/logo.svg" alt="Contrast Checker logo" className="h-6 w-6" />
+            <h1 className="text-lg font-semibold tracking-tight">
+              Contrast Checker
+            </h1>
+          </div>
           <p className="text-muted-foreground text-sm">
             WCAG 2.1 visual contrast analysis — upload an image to begin
           </p>
