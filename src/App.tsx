@@ -6,7 +6,7 @@ import { HoverInfoPanel } from "@/components/HoverInfoPanel"
 import { StatsPanel } from "@/components/StatsPanel"
 import { Separator } from "@/components/ui/separator"
 import { useImageAnalysis } from "@/hooks/useImageAnalysis"
-import { renderVisualization, type VisualizationMode } from "@/lib/imageProcessing"
+import type { VisualizationMode } from "@/lib/imageProcessing"
 
 export function App() {
   const [image, setImage] = useState<HTMLImageElement | null>(null)
@@ -14,7 +14,7 @@ export function App() {
   const [radius, setRadius] = useState(5)
   const [hoverPoint, setHoverPoint] = useState<HoverPoint | null>(null)
 
-  const analysis = useImageAnalysis(image, radius)
+  const analysis = useImageAnalysis(image, radius, mode)
 
   // Build the original-image ImageData once from raw data
   const originalImageData = useMemo<ImageData | null>(() => {
@@ -25,37 +25,6 @@ export function App() {
       analysis.height,
     )
   }, [analysis.originalData, analysis.width, analysis.height])
-
-  // Build the visualization ImageData whenever mode or analysis results change
-  const vizImageData = useMemo<ImageData | null>(() => {
-    if (
-      analysis.status !== "done" ||
-      !analysis.luminance ||
-      !analysis.contrast ||
-      !analysis.edge ||
-      !analysis.originalData
-    )
-      return null
-
-    return renderVisualization(
-      mode,
-      analysis.luminance,
-      analysis.contrast,
-      analysis.edge,
-      analysis.originalData,
-      analysis.width,
-      analysis.height,
-    )
-  }, [
-    mode,
-    analysis.status,
-    analysis.luminance,
-    analysis.contrast,
-    analysis.edge,
-    analysis.originalData,
-    analysis.width,
-    analysis.height,
-  ])
 
   const handleHover = useCallback((point: HoverPoint | null) => {
     setHoverPoint(point)
@@ -148,7 +117,7 @@ export function App() {
                   loading={analysis.status === "processing" && !analysis.originalData}
                 />
                 <CanvasViewer
-                  imageData={vizImageData}
+                  imageData={analysis.vizImageData}
                   label={
                     mode === "luminance"
                       ? "Luminance Map"
@@ -160,7 +129,7 @@ export function App() {
                   }
                   onHover={handleHover}
                   externalHover={hoverPoint}
-                  loading={analysis.status === "processing"}
+                  loading={analysis.status === "processing" || analysis.vizRendering}
                 />
               </div>
 

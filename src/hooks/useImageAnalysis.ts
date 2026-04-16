@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import type { AnalysisStats } from "@/lib/imageProcessing"
+import type { AnalysisStats, VisualizationMode } from "@/lib/imageProcessing"
 import type {
   AnalyzeRequest,
   AnalyzeFromBitmapRequest,
+  RenderRequest,
   WorkerOutMessage,
 } from "@/workers/imageAnalysis.worker"
 import AnalysisWorker from "@/workers/imageAnalysis.worker?worker"
@@ -16,9 +17,10 @@ export interface AnalysisState {
   stepTotal: number
   luminance: Float32Array | null
   contrast: Float32Array | null
-  edge: Float32Array | null
   stats: AnalysisStats | null
   originalData: Uint8ClampedArray | null
+  vizImageData: ImageData | null
+  vizRendering: boolean
   width: number
   height: number
   /** Original image dimensions before any downscaling. */
@@ -41,9 +43,10 @@ const IDLE_STATE: AnalysisState = {
   stepTotal: 5,
   luminance: null,
   contrast: null,
-  edge: null,
   stats: null,
   originalData: null,
+  vizImageData: null,
+  vizRendering: false,
   width: 0,
   height: 0,
   originalWidth: 0,
@@ -55,12 +58,14 @@ const IDLE_STATE: AnalysisState = {
 export function useImageAnalysis(
   image: HTMLImageElement | null,
   radius: number,
+  mode: VisualizationMode,
 ): AnalysisState {
   const [state, setState] = useState<AnalysisState>(IDLE_STATE)
 
   const workerRef = useRef<Worker | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const requestIdRef = useRef(0)
+  const renderRequestIdRef = useRef(0)
 
   // Tracks which image the layout effect last processed — prevents double-run
   // in React StrictMode from clearing state that was just set.
@@ -71,9 +76,11 @@ export function useImageAnalysis(
   const cachedWidthRef = useRef(0)
   const cachedHeightRef = useRef(0)
 
-  // Always up-to-date radius, read inside async closures.
+  // Always up-to-date radius/mode, read inside async closures.
   const radiusRef = useRef(radius)
   radiusRef.current = radius
+  const modeRef = useRef(mode)
+  modeRef.current = mode
 
   // ── Worker lifecycle ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -82,6 +89,18 @@ export function useImageAnalysis(
 
     worker.onmessage = (e: MessageEvent<WorkerOutMessage>) => {
       const msg = e.data
+
+      // Render results are tracked with a separate counter.
+      if (msg.type === "renderResult") {
+        if (msg.requestId !== renderRequestIdRef.current) return
+        setState((prev) => ({
+          ...prev,
+          vizImageData: new ImageData(new Uint8ClampedArray(msg.imageBuffer), msg.width, msg.height),
+          vizRendering: false,
+        }))
+        return
+      }
+
       if (msg.requestId !== requestIdRef.current) return
 
       switch (msg.type) {
@@ -108,7 +127,6 @@ export function useImageAnalysis(
               stepDone: prev.stepTotal,
               luminance: new Float32Array(msg.luminanceBuffer),
               contrast: new Float32Array(msg.contrastBuffer),
-              edge: new Float32Array(msg.edgeBuffer),
               stats: msg.stats,
               originalData: pd,
               width: msg.width,
@@ -125,10 +143,15 @@ export function useImageAnalysis(
               stepDone: prev.stepTotal,
               luminance: new Float32Array(msg.luminanceBuffer),
               contrast: new Float32Array(msg.contrastBuffer),
-              edge: new Float32Array(msg.edgeBuffer),
               stats: msg.stats,
             }))
           }
+
+          // Trigger off-thread render for the current mode.
+          const renderId = ++renderRequestIdRef.current
+          const renderMsg: RenderRequest = { type: "render", requestId: renderId, mode: modeRef.current }
+          setState((prev) => ({ ...prev, vizRendering: true }))
+          workerRef.current?.postMessage(renderMsg)
           break
         }
 
@@ -308,6 +331,19 @@ export function useImageAnalysis(
       }
     }
   }, [image, radius])
+
+  // ── Re-render when mode changes (analysis already done) ──────────────────
+  useEffect(() => {
+    // Only request a render if analysis is already complete; when analysis
+    // finishes it triggers its own render, so we avoid a redundant request.
+    if (state.status !== "done") return
+
+    const renderId = ++renderRequestIdRef.current
+    const renderMsg: RenderRequest = { type: "render", requestId: renderId, mode }
+    setState((prev) => ({ ...prev, vizRendering: true }))
+    workerRef.current?.postMessage(renderMsg)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
 
   return state
 }

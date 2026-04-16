@@ -3,7 +3,9 @@ import {
   buildContrastMap,
   buildEdgeMap,
   buildStats,
+  renderVisualization,
   type AnalysisStats,
+  type VisualizationMode,
 } from "../lib/imageProcessing"
 
 // ---------------------------------------------------------------------------
@@ -32,7 +34,14 @@ export interface AnalyzeRequest {
   radius: number
 }
 
-export type WorkerInMessage = AnalyzeFromBitmapRequest | AnalyzeRequest
+/** Render-only request: uses arrays cached from last analysis. */
+export interface RenderRequest {
+  type: "render"
+  requestId: number
+  mode: VisualizationMode
+}
+
+export type WorkerInMessage = AnalyzeFromBitmapRequest | AnalyzeRequest | RenderRequest
 
 // ---------------------------------------------------------------------------
 // Outbound message types
@@ -53,7 +62,6 @@ export interface AnalyzeResult {
   originalBuffer?: ArrayBufferLike
   luminanceBuffer: ArrayBufferLike
   contrastBuffer: ArrayBufferLike
-  edgeBuffer: ArrayBufferLike
   stats: AnalysisStats
   width: number
   height: number
@@ -62,13 +70,34 @@ export interface AnalyzeResult {
   wasDownscaled: boolean
 }
 
+export interface RenderResult {
+  type: "renderResult"
+  requestId: number
+  imageBuffer: ArrayBuffer
+  width: number
+  height: number
+}
+
 export interface ErrorMessage {
   type: "error"
   requestId: number
   message: string
 }
 
-export type WorkerOutMessage = ProgressMessage | AnalyzeResult | ErrorMessage
+export type WorkerOutMessage = ProgressMessage | AnalyzeResult | RenderResult | ErrorMessage
+
+// ---------------------------------------------------------------------------
+// Module-level render cache (retained after each analysis for render requests)
+// ---------------------------------------------------------------------------
+
+let renderCache: {
+  luminance: Float32Array
+  contrast: Float32Array
+  edge: Float32Array
+  original: Uint8ClampedArray
+  width: number
+  height: number
+} | null = null
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,13 +144,19 @@ async function handleFromBitmap(msg: AnalyzeFromBitmapRequest) {
   postProgress(requestId, "Calculating statistics…", 5, TOTAL)
   const stats = buildStats(contrast)
 
+  // Cache arrays so render requests can use them without re-analysis.
+  // Use a separate copy — originalBuffer is transferred to the main thread which
+  // would detach the ArrayBuffer and make the Uint8ClampedArray view read zeros.
+  renderCache = { luminance, contrast, edge, original: new Uint8ClampedArray(originalBuffer.slice(0)), width, height }
+
+  // Transfer originalBuffer and clone luminance/contrast to main thread.
+  // edge stays worker-only (only needed for rendering).
   const result: AnalyzeResult = {
     type: "result",
     requestId,
     originalBuffer,
-    luminanceBuffer: luminance.buffer,
-    contrastBuffer: contrast.buffer,
-    edgeBuffer: edge.buffer,
+    luminanceBuffer: luminance.buffer.slice(0),
+    contrastBuffer: contrast.buffer.slice(0),
     stats,
     width,
     height,
@@ -133,9 +168,8 @@ async function handleFromBitmap(msg: AnalyzeFromBitmapRequest) {
   self.postMessage(result, {
     transfer: [
       originalBuffer,
-      luminance.buffer as ArrayBuffer,
-      contrast.buffer as ArrayBuffer,
-      edge.buffer as ArrayBuffer,
+      result.luminanceBuffer as ArrayBuffer,
+      result.contrastBuffer as ArrayBuffer,
     ],
   })
 }
@@ -157,13 +191,17 @@ function handleFromBuffer(msg: AnalyzeRequest) {
   postProgress(requestId, "Calculating statistics…", 4, TOTAL)
   const stats = buildStats(contrast)
 
+  // Update cache — reuse existing original from previous cache (radius change doesn't replace image).
+  if (renderCache) {
+    renderCache = { ...renderCache, luminance, contrast, edge }
+  }
+
   // No originalBuffer — caller already has it cached
   const result: AnalyzeResult = {
     type: "result",
     requestId,
-    luminanceBuffer: luminance.buffer,
-    contrastBuffer: contrast.buffer,
-    edgeBuffer: edge.buffer,
+    luminanceBuffer: luminance.buffer.slice(0),
+    contrastBuffer: contrast.buffer.slice(0),
     stats,
     width,
     height,
@@ -174,11 +212,27 @@ function handleFromBuffer(msg: AnalyzeRequest) {
 
   self.postMessage(result, {
     transfer: [
-      luminance.buffer as ArrayBuffer,
-      contrast.buffer as ArrayBuffer,
-      edge.buffer as ArrayBuffer,
+      result.luminanceBuffer as ArrayBuffer,
+      result.contrastBuffer as ArrayBuffer,
     ],
   })
+}
+
+// ---------------------------------------------------------------------------
+// Render handler
+// ---------------------------------------------------------------------------
+
+function handleRender(msg: RenderRequest) {
+  if (!renderCache) return
+
+  const { luminance, contrast, edge, original, width, height } = renderCache
+  const imageData = renderVisualization(msg.mode, luminance, contrast, edge, original, width, height)
+  const buffer = imageData.data.buffer.slice(0) as ArrayBuffer
+
+  self.postMessage(
+    { type: "renderResult", requestId: msg.requestId, imageBuffer: buffer, width, height } satisfies RenderResult,
+    { transfer: [buffer] },
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +244,10 @@ self.onmessage = async (e: MessageEvent<WorkerInMessage>) => {
   try {
     if (msg.type === "analyzeFromBitmap") {
       await handleFromBitmap(msg)
-    } else {
+    } else if (msg.type === "analyze") {
       handleFromBuffer(msg)
+    } else {
+      handleRender(msg)
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

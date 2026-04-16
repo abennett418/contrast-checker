@@ -119,7 +119,7 @@ export function CanvasViewer({
     <>
       <div className="flex flex-col gap-1.5">
         {/* Label row with action buttons */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between h-6">
           <span className="text-muted-foreground text-xs font-medium uppercase tracking-wide">
             {label}
           </span>
