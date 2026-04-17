@@ -33,6 +33,8 @@ export function CanvasViewer({
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const [lightboxOpen, setLightboxOpen] = useState(false)
 
+  const isPortrait = imageData ? imageData.height > imageData.width : false
+
   // Draw image data whenever it changes
   useEffect(() => {
     const canvas = canvasRef.current
@@ -88,13 +90,22 @@ export function CanvasViewer({
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (!onHover || !imageData) return
-      const div = e.currentTarget
-      const rect = div.getBoundingClientRect()
+      // Use the canvas rect so coordinates are correct regardless of how the
+      // canvas is positioned inside its container (e.g. centred portrait images).
+      const canvas = canvasRef.current
+      const rect = canvas ? canvas.getBoundingClientRect() : e.currentTarget.getBoundingClientRect()
+      // Clamp to canvas bounds — ignore moves over the surrounding container
+      const relX = e.clientX - rect.left
+      const relY = e.clientY - rect.top
+      if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) {
+        onHover(null)
+        return
+      }
       // Scale from CSS pixel coordinates to image pixel coordinates
       const scaleX = imageData.width / rect.width
       const scaleY = imageData.height / rect.height
-      const x = Math.floor((e.clientX - rect.left) * scaleX)
-      const y = Math.floor((e.clientY - rect.top) * scaleY)
+      const x = Math.floor(relX * scaleX)
+      const y = Math.floor(relY * scaleY)
       const clampedX = Math.max(0, Math.min(imageData.width - 1, x))
       const clampedY = Math.max(0, Math.min(imageData.height - 1, y))
       onHover({ x: clampedX, y: clampedY })
@@ -149,21 +160,27 @@ export function CanvasViewer({
 
         {/* Canvas area */}
         <div
-          className="relative w-full overflow-hidden rounded-md border"
+          className={[
+            "relative overflow-hidden rounded-md border",
+            isPortrait ? "flex max-h-[60vh] w-full justify-center" : "w-full",
+          ].join(" ")}
           style={{ cursor: onHover ? "crosshair" : "default" }}
           onMouseMove={handleMouseMove}
           onMouseLeave={handleMouseLeave}
         >
           {imageData ? (
-            <>
+            <div className="relative">
               <canvas
                 ref={canvasRef}
-                className="block w-full"
+                className={isPortrait ? "block h-full max-h-[60vh] w-auto" : "block w-full"}
                 style={{ imageRendering: "pixelated" }}
               />
               <canvas
                 ref={overlayRef}
-                className="pointer-events-none absolute inset-0 block w-full"
+                className={[
+                  "pointer-events-none absolute inset-0 block",
+                  isPortrait ? "h-full w-auto" : "w-full",
+                ].join(" ")}
                 style={{ imageRendering: "pixelated" }}
               />
               {loading && (
@@ -171,7 +188,7 @@ export function CanvasViewer({
                   <div className="border-primary size-9 animate-spin rounded-full border-2 border-t-transparent" />
                 </div>
               )}
-            </>
+            </div>
           ) : loading ? (
             <div className="bg-muted flex aspect-video animate-pulse items-center justify-center rounded-md">
               <div className="border-primary size-9 animate-spin rounded-full border-2 border-t-transparent" />
@@ -220,7 +237,12 @@ export function CanvasViewer({
                   ctx?.putImageData(imageData, 0, 0)
                 }}
                 className="block max-h-full max-w-full"
-                style={{ imageRendering: "pixelated", width: "100%", height: "auto" }}
+                style={{
+                  imageRendering: "pixelated",
+                  ...(isPortrait
+                    ? { height: "100%", width: "auto" }
+                    : { width: "100%", height: "auto" }),
+                }}
               />
             </div>
           </DialogContent>
