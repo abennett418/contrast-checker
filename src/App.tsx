@@ -7,6 +7,7 @@ import { StatsPanel } from "@/components/StatsPanel"
 import { Separator } from "@/components/ui/separator"
 import { useImageAnalysis } from "@/hooks/useImageAnalysis"
 import type { VisualizationMode } from "@/lib/imageProcessing"
+import { publicUrl } from "@/lib/utils"
 
 export function App() {
   const [image, setImage] = useState<HTMLImageElement | null>(null)
@@ -38,7 +39,7 @@ export function App() {
       <header className="border-b px-6 py-4">
         <div className="mx-auto max-w-7xl">
           <div className="flex items-center gap-2">
-            <img src="/logo.svg" alt="Contrast Checker logo" className="h-6 w-6" />
+            <img src={publicUrl("logo.svg")} alt="Contrast Checker logo" className="h-6 w-6" />
             <h1 className="text-lg font-semibold tracking-tight">
               Contrast Checker
             </h1>
